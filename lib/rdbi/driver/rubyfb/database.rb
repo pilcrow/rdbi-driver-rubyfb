@@ -1,11 +1,18 @@
 require 'rdbi/driver/rubyfb'
 require 'rubyfb'
 
+#--
+#
+# AutoCommit is determined by the @fb_txns instance variable, an array of
+# (nested) transactions begun by the user:
+#
+#   @fb_txns.size == 0 ......... AutoCommit mode
+#   @fb_txns.size  > 0 ......... explicit transaction mode
+#
+#++
+
 class RDBI::Driver::Rubyfb::Database < RDBI::Database
-  attr_accessor :fb_db
-  attr_accessor :fb_cxn
   attr_reader   :fb_dialect
-  attr_reader   :fb_txns
 
   def initialize(*args)
     # XXX is :dbname required?  is :auth an appropriate name?
@@ -13,13 +20,13 @@ class RDBI::Driver::Rubyfb::Database < RDBI::Database
     # FIXME - dialect
     super(*args)
     self.database_name = @connect_args[:isc_database] || @connect_args[:database] || @connect_args[:db]
-    self.fb_db = Rubyfb::Database.new(self.database_name)
+    @fb_db = Rubyfb::Database.new(self.database_name)
     @fb_dialect = 3
 
     user = @connect_args[:user] || @connect_args[:username] || ENV['ISC_USER']
     pass = @connect_args[:password] || @connect_args[:auth] || ENV['ISC_PASSWORD']
     @fb_cxn  = @fb_db.connect(user, pass)
-    @fb_txns = [Rubyfb::Transaction.new(@fb_cxn)]
+    @fb_txns = []
   rescue Rubyfb::FireRubyException => e
     raise RDBI::Error.new(e.message)
   end
@@ -35,26 +42,31 @@ class RDBI::Driver::Rubyfb::Database < RDBI::Database
   end
 
   def transaction(&block)
-    @fb_txns << Rubyfb::Transaction.new(@fb_cxn)
+    open_new_transaction
     super &block
   end
 
   def commit
     # FIXME - in_trans? check
     @fb_txns.pop.commit
-    @fb_txns << Rubyfb::Transaction.new(@fb_cxn) if @fb_txns.empty?
     super
   end
 
   def rollback
     # FIXME - in_trans? check
     @fb_txns.pop.rollback
-    @fb_txns << Rubyfb::Transaction.new(@fb_cxn) if @fb_txns.empty?
     super
   end
 
   def new_statement(query)
-    RDBI::Driver::Rubyfb::Statement.new(query, self)
+    # Open a new transaction if in AutoCommit
+    txn = (@fb_txns[-1] || open_new_transaction)
+    RDBI::Driver::Rubyfb::Statement.new(query,
+                                        self,
+                                        Rubyfb::Statement.new(@fb_cxn,
+                                                              txn,
+                                                              query,
+                                                              @fb_dialect))
   end
 
   # Return the elapsed time taken to check the database connection, or
@@ -135,4 +147,10 @@ SELECT rdb$relation_name FROM rdb$relations WHERE rdb$system_flag != 1
 eosql
   end
 
+  private
+  def open_new_transaction
+    txn = Rubyfb::Transaction.new(@fb_cxn)
+    @fb_txns << txn
+    txn
+  end
 end # -- class Database
