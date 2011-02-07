@@ -6,6 +6,9 @@ require 'epoxy'
 
 #--
 # TODO:  Allow changing time zone
+#
+# AutoCommit considerations: delay commit for SELECT, SELECT FOR UPDATE, and
+# EXECUTE PROC statements.
 #++
 
 class RDBI::Driver::Rubyfb
@@ -38,13 +41,10 @@ class Statement < RDBI::Statement
                  :char      => [TypeLib::Filter.new(IS_STR, STR_RTRIM)]
                }) # :nodoc:
 
-  def initialize(query, dbh)
+  def initialize(query, dbh, fb_stmt)
     super(query, dbh)
 
-    @fb_stmt = Rubyfb::Statement.new(dbh.fb_cxn,
-                                     dbh.fb_txns[-1],
-                                     query,
-                                     dbh.fb_dialect)
+    @fb_stmt = fb_stmt
 
     @index_map = Epoxy.new(query).indexed_binds
   end
@@ -68,16 +68,6 @@ class Statement < RDBI::Statement
       end
     end
 
-    unless @fb_stmt.transaction.active?
-      # We've been called and committed/rollbacked before
-      # XXX - do we really have to re-prepare for a new TXN?
-      @fb_stmt = Rubyfb::Statement.new(dbh.fb_cxn,
-                                       Rubyfb::Transaction.new(dbh.fb_cxn),
-                                       query,
-                                       dbh.fb_dialect)
-    end
-
-    #puts "Statement#execute(#{dbh.fb_cxn}, #{@fb_stmt.transaction}, \"#{query}\")"
     result = binds.length > 0 ? @fb_stmt.execute_for(binds) : @fb_stmt.execute
 
     num_columns = result.column_count rescue 0
@@ -100,4 +90,39 @@ class Statement < RDBI::Statement
   end #-- new_execution
 
 end #-- class Statement
+class AutoCommitStatement < Statement
+  def initialize(query, dbh, fb_stmt)
+    super
+  end
+
+  def new_execution(*binds)
+    cursor, col_info, type_map = super
+
+    if commit_immediately?
+      @fb_stmt.transaction.commit if commit_immediately?
+    else
+      (class << cursor.handle; self; end).class_eval do
+        def finish
+          transaction.commit if transaction.active?
+          super
+        end
+      end
+    end
+  rescue
+    @fb_stmt.transaction.rollback if @fb_stmt.transaction.active?
+  end
+
+  def finish
+    @fb_stmt.transaction.commit if @fb_stmt.transaction.active?
+    super
+  end
+
+  private
+  def commit_immediately?
+    self.rewindable_result or not
+      [Rubyfb::Statement::SELECT_STATEMENT,
+       Rubyfb::Statement::SELECT_FOR_UPDATE_STATEMENT,
+       Rubyfb::Statement::EXECUTE_PROCEDURE_STATEMENT].include?(@fb_stmt.type)
+  end
+end #-- class AutoCommitStatement
 end #-- class RDBI::Driver::Rubyfb
