@@ -33,9 +33,10 @@ If +rewindable_result+ is true, +rdbi-driver-rubyfb+ provides fully rewindable
 the entire result set into memory.
 
 === Transactions
-* "Manual commit" only
-  There is _no_ autocommit mode at present.  This may change in a future
-  release, but you should use explicit transactions anyway.
+* Autocommit by default
+
+* Prepared statements valid only for a given transaction.
+  ??? Really ???
 
 * Transactional DDL requires commit
   Firebird supports transactional DDL like other industrial databases.
